@@ -1,0 +1,7 @@
+**.exe
+**.7z
+**.stackdump
+**.dll
+icudtl.dat
+*.swp
+.vscode
