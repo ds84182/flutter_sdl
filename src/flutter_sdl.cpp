@@ -194,7 +194,7 @@ SDL_Window *makeWindow() {
 #pragma endregion
 
 void updateSize(FlutterEngine engine, size_t width, size_t height, float pixelRatio, bool maximized) {
-  printf("%dx%d@%f\n", width, height, pixelRatio);
+  printf("Update size: %dx%d@%f\n", width, height, pixelRatio);
   FlutterWindowMetricsEvent event = {0};
   event.struct_size = sizeof(event);
   event.width = width * scaleFactor;
@@ -204,8 +204,6 @@ void updateSize(FlutterEngine engine, size_t width, size_t height, float pixelRa
   // Windows gives us DPI-aware system metrics, but FlutterWindowMetrics wants physical size
   event.padding_top = (captionHeight() + (maximized ? 0 : captionBorders())); // pixelRatio;
 #endif
-  // event.padding_top = kWindowTitleBarSize * event.pixel_ratio;
-  // event.padding_bottom = event.padding_right = event.padding_left = kWindowBorderSize * event.pixel_ratio;
   FlutterEngineSendWindowMetricsEvent(engine, &event);
 }
 
@@ -352,25 +350,20 @@ FlutterEngine RunFlutter(SDL_Window *window, SDL_GLContext context) {
 #define MY_PROJECT "C:\\Users\\ds841\\Documents\\flutter\\examples\\flutter_gallery\\"
 #endif
 
-  char fullPathBuffer[256] = {};
-  GetFullPathNameA(MY_PROJECT, 256, fullPathBuffer, nullptr);
-  printf("%s\n", fullPathBuffer);
-  auto str = std::string(fullPathBuffer) + "lib/main.dart";
-
   FlutterProjectArgs args = {0};
   args.struct_size = sizeof(FlutterProjectArgs);
   args.assets_path = MY_PROJECT "build\\flutter_assets";
-  args.main_path = str.c_str();
+  args.main_path = MY_PROJECT "lib/main.dart";
   args.packages_path = MY_PROJECT ".packages";
   args.platform_message_callback = &messageCallback;
   FlutterEngine engine = nullptr;
-  auto result = FlutterEngineRun(FLUTTER_ENGINE_VERSION, &config, // renderer
-                 &args, window, &engine);
-  // assert(result == kSuccess && engine != nullptr);
+  auto result = FlutterEngineRun(FLUTTER_ENGINE_VERSION, &config, &args, window, &engine);
 
-  // glfwSetWindowUserPointer(window, engine);
+  if (result != kSuccess) {
+    fprintf(stderr, "Failed to start up the Flutter Engine\n");
+    return nullptr;
+  }
 
-  // GLFWwindowSizeCallback(window, kInitialWindowWidth, kInitialWindowHeight);
   int w, h;
   SDL_GetWindowSize(window, &w, &h);
   float ddpi = 1.0f;
@@ -390,33 +383,30 @@ int main() {
 #endif
 
 #ifdef _WIN32
-  typedef BOOL (WINAPI *SetProcessDPIAware_t)(void);
+  // Tell Windows that we're DPI aware (prevents terrible scaling on HighDPI displays)
+  using SetProcessDPIAware_t = BOOL (WINAPI*)();
   HMODULE hMod = LoadLibrary(L"user32.dll");
-  if ( hMod ) {
-    SetProcessDPIAware_t pSetProcessDPIAware = (SetProcessDPIAware_t)GetProcAddress(hMod, "SetProcessDPIAware");
-    if ( pSetProcessDPIAware ) {
+  if (hMod) {
+    SetProcessDPIAware_t pSetProcessDPIAware = reinterpret_cast<SetProcessDPIAware_t>(GetProcAddress(hMod, "SetProcessDPIAware"));
+    if (pSetProcessDPIAware) {
       pSetProcessDPIAware();
     }
-    FreeLibrary( hMod );
+    FreeLibrary(hMod);
   }
 #endif
 
-  SDL_Window* window = NULL;
   if (SDL_Init(SDL_INIT_VIDEO) < 0) {
-    fprintf(stderr, "could not initialize sdl2: %s\n", SDL_GetError());
+    fprintf(stderr, "Could not initialize SDL2: %s\n", SDL_GetError());
     return 1;
   }
 
-  /* Request opengl 3.2 context.
-   * SDL doesn't have the ability to choose which profile at this time of writing,
-   * but it should default to the core profile */
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 2);
 
-  /* Turn on double buffering with a 24bit Z buffer.
-   * You may need to change this to 16 or 32 for your system */
   SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
   SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
+
+  SDL_Window *window = nullptr;
 
 #ifdef _WIN32
   window = makeWindow(hInstance, nCmdShow);
@@ -424,8 +414,8 @@ int main() {
   window = makeWindow();
 #endif
 
-  if (window == NULL) {
-    fprintf(stderr, "could not create window: %s\n", SDL_GetError());
+  if (window == nullptr) {
+    fprintf(stderr, "Could not create window: %s\n", SDL_GetError());
     return 1;
   }
   
@@ -434,6 +424,10 @@ int main() {
   SDL_GL_SetSwapInterval(1);
 
   auto engine = RunFlutter(window, context);
+
+  if (!engine) {
+    return 1;
+  }
 
   bool mouseDown = false;
   int mouseId = 0;
@@ -447,14 +441,10 @@ int main() {
       __FlutterEngineFlushPendingTasksNow();
       if (e.type == SDL_QUIT) {
         quit = true;
-        printf("Quit\n");
-        fflush(stdout);
         break;
       } else if (e.type == SDL_WINDOWEVENT) {
         if (e.window.event == SDL_WINDOWEVENT_CLOSE) {
           quit = true;
-          printf("Quit (window close)\n");
-          fflush(stdout);
           break;
         } else if (e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
           int w, h;
@@ -502,10 +492,8 @@ int main() {
           updatePointer(engine, FlutterPointerPhase::kMove, e.motion.x, e.motion.y, e.motion.timestamp);
         }
       } else if (e.type == SDL_TEXTEDITING) {
-        printf("Text editing: '%s' %d %d\n", e.edit.text, e.edit.start, e.edit.length);
         sendTextEditing(engine, e.edit);
       } else if (e.type == SDL_TEXTINPUT) {
-        printf("Text input: '%s'\n", e.text.text);
         sendTextInput(engine, e.text);
       } else if (e.type == SDL_KEYDOWN || e.type == SDL_KEYUP) {
         sendKeyInput(engine, e.key);
