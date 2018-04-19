@@ -2,6 +2,8 @@
 #define WIN32_LEAN_AND_MEAN
 #define UNICODE
 #define _UNICODE
+#include <windows.h>
+#include <shellapi.h>
 #endif
 
 #include <SDL2/SDL.h>
@@ -11,8 +13,10 @@
 
 #include <chrono>
 #include <string_view>
+#include <codecvt>
 
 #include <cstdint>
+#include <numeric>
 
 #include <embedder.h>
 #include "json.hpp"
@@ -76,7 +80,7 @@ SDL_Window *makeWindow(HINSTANCE hInstance, int nCmdShow) {
 
   SetWindowLongPtr(hwnd, GWLP_WNDPROC, (LONG_PTR)DefWindowProc);
 
-  auto dummyWindow = SDL_CreateWindow("", 0, 0, 1, 1, SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN | SDL_WINDOW_ALLOW_HIGHDPI);
+  auto dummyWindow = SDL_CreateWindow("", 0, 0, 1, 1, SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_BORDERLESS);
 
   char sBuf[32];
   sprintf_s<32>(sBuf, "%p", dummyWindow);
@@ -195,6 +199,10 @@ SDL_Window *makeWindow() {
 
 void updateSize(FlutterEngine engine, size_t width, size_t height, float pixelRatio, bool maximized) {
   printf("Update size: %dx%d@%f\n", width, height, pixelRatio);
+  // Round up the physical window size to a multiple of the pixel ratio
+  width = std::ceil(width / pixelRatio) * pixelRatio;
+  height = std::ceil(height / pixelRatio) * pixelRatio;
+  printf("Adjusted size: %dx%d@%f\n", width, height, pixelRatio);
   FlutterWindowMetricsEvent event = {0};
   event.struct_size = sizeof(event);
   event.width = width * scaleFactor;
@@ -319,7 +327,34 @@ void messageCallback(const FlutterPlatformMessage *message, void *userData) {
   }
 }
 
-FlutterEngine RunFlutter(SDL_Window *window, SDL_GLContext context) {
+std::tuple<int, int, float> roundWindowSize(SDL_Window *window) {
+  // Only rounds correctly if the display's resolution is a multiple of it's density
+  // Otherwise: Applications probably don't render properly in the first place, and this one won't
+
+  int w, h;
+  SDL_GL_GetDrawableSize(window, &w, &h);
+  float ddpi = 96.0f;
+  auto display = SDL_GetWindowDisplayIndex(window);
+  SDL_GetDisplayDPI(display, &ddpi, nullptr, nullptr);
+  SDL_DisplayMode mode;
+  SDL_GetCurrentDisplayMode(display, &mode);
+  auto pf = (ddpi / 96.0f);
+  auto vw = mode.w / pf;
+  auto vh = mode.h / pf;
+  int vwi = std::ceil(vw);
+  int vhi = std::ceil(vh);
+  int pw = vwi * pf;
+  int ph = vhi * pf;
+  int wgcd = std::gcd(pw, vwi);
+  int hgcd = std::gcd(ph, vhi);
+  printf("%fx%f; %dx%d; %d & %d; %d/%d & %d/%d\n", vw, vh, pw, ph, wgcd, hgcd, pw / wgcd, vwi / wgcd, ph / hgcd, vhi / hgcd);
+
+  float wround = pw / wgcd;
+  float hround = ph / hgcd;
+  return std::tuple<int, int, float>(int(std::ceil(float(w) / float(wround)) * wround), int(std::ceil(float(h) / float(hround)) * hround), pf);
+}
+
+FlutterEngine RunFlutter(SDL_Window *window, SDL_GLContext context, int argc, const char * const *argv) {
   SDL_SetWindowData(window, "GL", context);
 
   FlutterRendererConfig config = {};
@@ -356,6 +391,9 @@ FlutterEngine RunFlutter(SDL_Window *window, SDL_GLContext context) {
   args.main_path = MY_PROJECT "lib/main.dart";
   args.packages_path = MY_PROJECT ".packages";
   args.platform_message_callback = &messageCallback;
+  args.icu_data_path = MY_PROJECT "icudtl.dat";
+  args.command_line_argc = argc;
+  args.command_line_argv = argv;
   FlutterEngine engine = nullptr;
   auto result = FlutterEngineRun(FLUTTER_ENGINE_VERSION, &config, &args, window, &engine);
 
@@ -364,11 +402,8 @@ FlutterEngine RunFlutter(SDL_Window *window, SDL_GLContext context) {
     return nullptr;
   }
 
-  int w, h;
-  SDL_GetWindowSize(window, &w, &h);
-  float ddpi = 1.0f;
-  SDL_GetDisplayDPI(SDL_GetWindowDisplayIndex(window), &ddpi, nullptr, nullptr);
-  updateSize(engine, w, h, ddpi / 96.0f, SDL_GetWindowFlags(window) & SDL_WINDOW_MAXIMIZED);
+  auto [w, h, dpi] = roundWindowSize(window);
+  updateSize(engine, w, h, dpi, SDL_GetWindowFlags(window) & SDL_WINDOW_MAXIMIZED);
 
   return engine;
 }
@@ -378,8 +413,22 @@ int WinMain(_In_ HINSTANCE hInstance,
       _In_opt_ HINSTANCE hPrevInstance,
       _In_ LPSTR    lpCmdLine,
       _In_ int       nCmdShow) {
+
+  // Workaround, see https://cat-in-136.github.io/2010/03/pitfall-of-unicode-in-mingw32.html
+  int argc;
+  WCHAR **wargv = CommandLineToArgvW(GetCommandLineW(), &argc);
+  std::wstring_convert<std::codecvt_utf8<wchar_t>, wchar_t> wcharconv;
+  std::vector<std::string> converted_argv(argc);
+  for (int i = 0; i < argc; i++) {
+    converted_argv[i] = wcharconv.to_bytes(reinterpret_cast<wchar_t*>(wargv[i]));
+  }
+  std::vector<const char *> plain_converted_argv(argc, nullptr);
+  for (int i = 0; i < argc; i++) {
+    plain_converted_argv[i] = converted_argv[i].c_str();
+  }
+  const char * const *argv = plain_converted_argv.data();
 #else
-int main() {
+int main(int argc, const char * const *argv) {
 #endif
 
 #ifdef _WIN32
@@ -423,7 +472,18 @@ int main() {
 
   SDL_GL_SetSwapInterval(1);
 
-  auto engine = RunFlutter(window, context);
+  auto rounded_size = roundWindowSize(window);
+#ifdef _WIN32
+  #define PADDING_X 8
+  #define PADDING_Y 9
+#else
+  #define PADDING_X 0
+  #define PADDING_Y 0
+#endif
+  // Clean pixel boundary at screen scale factor
+  SDL_SetWindowSize(window, rounded_size.get(0) + PADDING_X, rounded_size.get(1) + PADDING_Y);
+
+  auto engine = RunFlutter(window, context, argc, argv);
 
   if (!engine) {
     return 1;
@@ -451,9 +511,8 @@ int main() {
           SDL_GetWindowSize(window, &w, &h);
 
           if (!(SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED)) {
-            float ddpi = 1.0f;
-            SDL_GetDisplayDPI(SDL_GetWindowDisplayIndex(window), &ddpi, nullptr, nullptr);
-            updateSize(engine, w, h, ddpi / 96.0f, SDL_GetWindowFlags(window) & SDL_WINDOW_MAXIMIZED);
+            auto [w, h, dpi] = roundWindowSize(window);
+            updateSize(engine, w, h, dpi, SDL_GetWindowFlags(window) & SDL_WINDOW_MAXIMIZED);
           }
         } else if (e.window.event == SDL_WINDOWEVENT_LEAVE) {
           if (mouseDown) {
