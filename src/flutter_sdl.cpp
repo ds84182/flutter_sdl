@@ -481,7 +481,7 @@ int main(int argc, const char * const *argv) {
   #define PADDING_Y 0
 #endif
   // Clean pixel boundary at screen scale factor
-  SDL_SetWindowSize(window, rounded_size.get(0) + PADDING_X, rounded_size.get(1) + PADDING_Y);
+  SDL_SetWindowSize(window, std::get<0>(rounded_size) + PADDING_X, std::get<1>(rounded_size) + PADDING_Y);
 
   auto engine = RunFlutter(window, context, argc, argv);
 
